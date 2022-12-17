@@ -30,23 +30,34 @@ import numpy as np
 import voxelmorph as vxm
 import tensorflow as tf
 import torch
+from einops import rearrange
+
+def data_padding(data):
+    shape = data.shape
+    padding = []
+    for len in shape:
+        i = 0
+        while 2**i < len:
+            i += 1
+        padding.append(((2**i-len)//2, 2**i-len-(2**i-len)//2))
+    return tf.pad(data, padding), padding
 
 # parse commandline args
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--moving",
-    default="/ssd/1/lrr/test/scriptForMotionVector/subj1.npz",
+    default="/ssd/1/lrr/test/brain_small.nii",
     help="moving image (source) filename",
 )
 parser.add_argument(
     "--fixed",
-    default="/ssd/1/lrr/test/scriptForMotionVector/subj2.npz",
+    default="/ssd/1/lrr/test/brain_small.nii",
     help="fixed image (target) filename",
 )
-parser.add_argument("--moved", default="moved.nii", help="warped image output filename")
+parser.add_argument("--moved", default="test_moved.nii", help="warped image output filename")
 parser.add_argument(
     "--model",
-    default="/ssd/1/lrr/test/scriptForMotionVector/testmodel.h5",
+    default="/ssd/1/lrr/test/scriptForMotionVector/brain_3d.h5",
     help="pytorch model for nonlinear registration",
 )
 parser.add_argument(
@@ -67,9 +78,16 @@ device, nb_devices = vxm.tf.utils.setup_device(args.gpu)
 
 # load moving and fixed images
 add_feat_axis = not args.multichannel
-moving = vxm.py.utils.load_volfile(args.moving, add_batch_axis=True, add_feat_axis=add_feat_axis) #W H D
+moving = vxm.py.utils.load_volfile(args.moving, add_batch_axis=False, add_feat_axis=add_feat_axis) #W H D T C
 fixed, fixed_affine = vxm.py.utils.load_volfile(
-    args.fixed, add_batch_axis=True, add_feat_axis=add_feat_axis, ret_affine=True)
+    args.fixed, add_batch_axis=False, add_feat_axis=add_feat_axis, ret_affine=True)
+
+moving = rearrange(moving, "W H D T C -> T W H D C")
+fixed = rearrange(fixed, "W H D T C -> T W H D C")
+moving, _ = data_padding(moving[0])
+moving = moving[None, ...]
+fixed, _ = data_padding(fixed[1])
+fixed = fixed[None, ...]
 
 inshape = moving.shape[1:-1]
 nb_feats = moving.shape[-1]

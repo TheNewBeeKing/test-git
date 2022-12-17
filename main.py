@@ -116,25 +116,31 @@ args = parser.parse_args()
 device, nb_devices = vxm.tf.utils.setup_device(args.gpu)
                  
 dataset = tifffile.imread(args.dataset) #T D H W
-dataset = rearrange(dataset, "T D H W -> T () W H D ()")
-fixed, padding_info = data_padding(dataset[0, ...])
+dataset = rearrange(dataset, "T D H W -> T () D H W ()")
+moving, padding_info = data_padding(dataset[0])
 warp_list = []
 
-inshape = fixed.shape[1:-1]
+inshape = moving.shape[1:-1]
 
 
-
-for i in range(1, 4):
-    moving, _ = data_padding(dataset[i, ...])
+end = 4
+for i in range(1, end):
+    fixed, _ = data_padding(dataset[i, ...])
     with tf.device(device):
     # load model and predict
         config = dict(inshape=inshape, input_model=None)
-        warp = vxm.networks.VxmDense.load(args.model, **config)
-        warp = warp.register(moving, fixed)
+        warp = vxm.networks.VxmDense.load(args.model, **config).register(moving, fixed)
+        moved = vxm.networks.Transform(inshape).predict([moving, warp])
+        tifffile.imwrite(
+            "./666.tif",
+            rearrange(moved, "T D H W C -> T D C H W"),
+            imagej=True,
+        )
+        sys.exit()
         warp_list.append(warp.squeeze())
 
 
-warp_data = np.stack(warp_list)  #T W H D C
+warp_data = np.stack(warp_list)  #T D H W C
 
 
 
@@ -176,7 +182,7 @@ tblogger = SummaryWriter(output_dir)
 # 2. prepare data, weight_map
 sideinfos = SideInfos4D()
 
-data = rearrange(warp_data, "T W H D C-> T D H W C") 
+data = warp_data
 data_shape = ",".join([str(i) for i in data.shape])
 sideinfos.time, sideinfos.depth, sideinfos.width, sideinfos.height = data.shape[0:4]
 n_samples = sideinfos.time * sideinfos.depth * sideinfos.width * sideinfos.height
@@ -322,10 +328,7 @@ for steps in range(1, n_training_steps + 1):
                 flattened_decompressed_data[
                     start_sample_idx:end_sample_idx
                 ] = network(flattened_coords[start_sample_idx:end_sample_idx])
-            decompression_time_end = time.time()
-            decompression_time_seconds = (
-                decompression_time_end - decompression_time_start
-            )
+        
             decompressed_data = rearrange(
                 flattened_decompressed_data,
                 "(t d h w) c -> t d h w c",
@@ -336,6 +339,18 @@ for steps in range(1, n_training_steps + 1):
             )
             decompressed_data = decompressed_data.cpu().numpy()
             decompressed_data = inv_normalize(decompressed_data, sideinfos)
+
+            decomp_moving = moving
+            inshape = decomp_moving.shape[1:4]
+            nb_feats=decomp_moving.shape[-1]
+            decomp_moving = np.concatenate([decomp_moving for i in range(1, end)], axis=0)
+            decomp_warp = decompressed_data
+            decomp_moved = vxm.networks.Transform(inshape, nb_feats=nb_feats).predict([decomp_moving, decomp_warp])
+
+            decompression_time_end = time.time()
+            decompression_time_seconds = (
+                decompression_time_end - decompression_time_start
+            )
         # save decompressed data
         decompressed_data_save_dir = opj(curr_steps_dir, "decompressed")
         os.makedirs(decompressed_data_save_dir)
@@ -345,7 +360,7 @@ for steps in range(1, n_training_steps + 1):
         )
         tifffile.imwrite(
             decompressed_data_save_path,
-            rearrange(decompressed_data, "T D H W C -> T D C H W"),
+            rearrange(decomp_moved, "T D H W C -> T D C H W"),
             imagej=True,
         )
         # calculate metrics

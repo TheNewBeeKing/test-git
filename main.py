@@ -136,7 +136,7 @@ args = parser.parse_args()
 device, nb_devices = vxm.tf.utils.setup_device(args.gpu)
 
 
-end = 6   
+end = 30   
 dataset = tifffile.imread(args.dataset) #T D H W
 raw_dataset = rearrange(dataset, "T D H W -> T D H W ()")
 dataset, norm_info = data_norm(raw_dataset[0:end])
@@ -153,14 +153,8 @@ fixed, _ = data_padding(dataset[1:], t_axis=True)
 with tf.device(device):
 # load model and predict
     config = dict(inshape=inshape, input_model=None)
-    for i in range(0, len(moving)):
-        i_moving = moving[i]
-        i_moving = i_moving[None, ...]
-        i_fixed = fixed[i]
-        i_fixed = i_fixed[None, ...]
-        warp = vxm.networks.VxmDense.load(args.model, **config)
-        warp = warp.register(i_moving, i_fixed)
-        warp_list.append(warp)
+    warp = vxm.networks.VxmDense.load(args.model, **config)
+    warp = warp.register(moving, fixed)
     # moved = vxm.networks.Transform(inshape).predict([moving, warp])
     # tifffile.imwrite(
     #     "./666.tif",
@@ -168,7 +162,6 @@ with tf.device(device):
     #     imagej=True,
     # )
 
-warp = np.concatenate(warp_list)
 
 
 

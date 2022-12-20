@@ -42,22 +42,27 @@ def data_padding(data):
         padding.append(((2**i-len)//2, 2**i-len-(2**i-len)//2))
     return tf.pad(data, padding), padding
 
+def data_norm(data):
+    max = data.max()
+    min = data.min()
+    return (data-min) / (max-min)
+
 # parse commandline args
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--moving",
-    default="/ssd/1/lrr/test/brain_small.nii",
+    default="/ssd/1/lrr/test/frame_fixed_brain_small.nii",
     help="moving image (source) filename",
 )
 parser.add_argument(
     "--fixed",
-    default="/ssd/1/lrr/test/brain_small.nii",
+    default="/ssd/1/lrr/test/frame_moving_brain_small.nii",
     help="fixed image (target) filename",
 )
-parser.add_argument("--moved", default="test_moved.nii", help="warped image output filename")
+parser.add_argument("--moved", default="moved.nii", help="warped image output filename")
 parser.add_argument(
     "--model",
-    default="/ssd/1/lrr/test/scriptForMotionVector/brain_3d.h5",
+    default="/ssd/1/lrr/test/scriptForMotionVector/synthmorph_brain.h5",
     help="pytorch model for nonlinear registration",
 )
 parser.add_argument(
@@ -82,12 +87,15 @@ moving = vxm.py.utils.load_volfile(args.moving, add_batch_axis=False, add_feat_a
 fixed, fixed_affine = vxm.py.utils.load_volfile(
     args.fixed, add_batch_axis=False, add_feat_axis=add_feat_axis, ret_affine=True)
 
-moving = rearrange(moving, "W H D T C -> T W H D C")
-fixed = rearrange(fixed, "W H D T C -> T W H D C")
-moving, _ = data_padding(moving[0])
+
 moving = moving[None, ...]
-fixed, _ = data_padding(fixed[1])
 fixed = fixed[None, ...]
+
+moving = data_norm(moving)
+fixed = data_norm(fixed)
+
+moving, _ = data_padding(moving)
+fixed, _ = data_padding(fixed)
 
 inshape = moving.shape[1:-1]
 nb_feats = moving.shape[-1]

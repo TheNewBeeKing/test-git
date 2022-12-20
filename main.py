@@ -80,15 +80,35 @@ from utils.samplers import RandomPointSampler4D
 #                     help='specify that data has multiple channels')
 # args = parser.parse_args()
 
-def data_padding(data):
+def data_padding(data, t_axis=False):
     shape = data.shape
     padding = []
-    for len in shape:
-        i = 0
-        while 2**i < len:
-            i += 1
-        padding.append(((2**i-len)//2, 2**i-len-(2**i-len)//2))
-    return tf.pad(data, padding), padding
+    padding_info = []
+    if t_axis == False:
+        for len in shape:
+            i = 0
+            while (len+i)%32!=0 and len!=1:
+                i += 1
+            padding.append((i//2, i-i//2))
+            padding_info.append((i//2, i//2+len))
+        return tf.pad(data, padding), padding_info
+    else:
+        padding.append((0, 0))
+        for len in shape[1:]:
+            i = 0
+            while (len+i)%32!=0 and len!=1:
+                i += 1
+            padding.append((i//2, i-i//2))
+            padding_info.append((i//2, i//2+len))
+        return tf.pad(data, padding), padding_info
+
+def data_norm(data):
+    max = data.max()
+    min = data.min()
+    return (data-min) / (max-min), (max, min)
+
+def data_invnorm(data, max, min):
+    return data*(max-min)+min
         
 
 parser = argparse.ArgumentParser()
@@ -114,41 +134,51 @@ args = parser.parse_args()
 
 # tensorflow device handling
 device, nb_devices = vxm.tf.utils.setup_device(args.gpu)
-                 
+
+
+end = 6   
 dataset = tifffile.imread(args.dataset) #T D H W
-dataset = rearrange(dataset, "T D H W -> T () D H W ()")
+raw_dataset = rearrange(dataset, "T D H W -> T D H W ()")
+dataset, norm_info = data_norm(raw_dataset[0:end])
 moving, padding_info = data_padding(dataset[0])
+moving_list = []
 warp_list = []
+for i in range(1, end):
+    moving_list.append(moving)
+moving = tf.stack(moving_list, axis=0)
 
 inshape = moving.shape[1:-1]
 
+fixed, _ = data_padding(dataset[1:], t_axis=True)
+with tf.device(device):
+# load model and predict
+    config = dict(inshape=inshape, input_model=None)
+    for i in range(0, len(moving)):
+        i_moving = moving[i]
+        i_moving = i_moving[None, ...]
+        i_fixed = fixed[i]
+        i_fixed = i_fixed[None, ...]
+        warp = vxm.networks.VxmDense.load(args.model, **config)
+        warp = warp.register(i_moving, i_fixed)
+        warp_list.append(warp)
+    # moved = vxm.networks.Transform(inshape).predict([moving, warp])
+    # tifffile.imwrite(
+    #     "./666.tif",
+    #     rearrange(moved, "T D H W C -> T D C H W"),
+    #     imagej=True,
+    # )
 
-end = 4
-for i in range(1, end):
-    fixed, _ = data_padding(dataset[i, ...])
-    with tf.device(device):
-    # load model and predict
-        config = dict(inshape=inshape, input_model=None)
-        warp = vxm.networks.VxmDense.load(args.model, **config).register(moving, fixed)
-        moved = vxm.networks.Transform(inshape).predict([moving, warp])
-        tifffile.imwrite(
-            "./666.tif",
-            rearrange(moved, "T D H W C -> T D C H W"),
-            imagej=True,
-        )
-        sys.exit()
-        warp_list.append(warp.squeeze())
-
-
-warp_data = np.stack(warp_list)  #T D H W C
+warp = np.concatenate(warp_list)
 
 
 
 ###SIREN
 EXPERIMENTAL_CONDITIONS = ["data_name", "data_type", "data_shape", "actual_ratio"]
 METRICS = [
-    "psnr",
-    "ssim",
+    "MV_psnr",
+    "MV_ssim",
+    "data_psnr",
+    "data_ssim",
     "compression_time_seconds",
     "decompression_time_seconds",
     "original_data_path",
@@ -182,7 +212,7 @@ tblogger = SummaryWriter(output_dir)
 # 2. prepare data, weight_map
 sideinfos = SideInfos4D()
 
-data = warp_data
+data = warp
 data_shape = ",".join([str(i) for i in data.shape])
 sideinfos.time, sideinfos.depth, sideinfos.width, sideinfos.height = data.shape[0:4]
 n_samples = sideinfos.time * sideinfos.depth * sideinfos.width * sideinfos.height
@@ -343,9 +373,11 @@ for steps in range(1, n_training_steps + 1):
             decomp_moving = moving
             inshape = decomp_moving.shape[1:4]
             nb_feats=decomp_moving.shape[-1]
-            decomp_moving = np.concatenate([decomp_moving for i in range(1, end)], axis=0)
+            decomp_moving = moving
             decomp_warp = decompressed_data
             decomp_moved = vxm.networks.Transform(inshape, nb_feats=nb_feats).predict([decomp_moving, decomp_warp])
+            decomp_moved = decomp_moved[:, padding_info[0][0]:padding_info[0][1], padding_info[1][0]:padding_info[1][1], padding_info[2][0]:padding_info[2][1]]
+            decomp_moved = data_invnorm(decomp_moved, norm_info[0], norm_info[1])
 
             decompression_time_end = time.time()
             decompression_time_seconds = (
@@ -364,8 +396,10 @@ for steps in range(1, n_training_steps + 1):
             imagej=True,
         )
         # calculate metrics
-        psnr = calc_psnr(data, decompressed_data)
-        ssim = calc_ssim(data, decompressed_data)
+        mv_psnr = calc_psnr(data, decompressed_data)
+        mv_ssim = calc_ssim(data, decompressed_data)
+        data_psnr = calc_psnr(raw_dataset[1:end, ..., 0], decomp_moved[..., 0])
+        data_ssim = calc_ssim(raw_dataset[1:end, ..., 0], decomp_moved[..., 0])
         # record results
         results = {k: None for k in EXPERIMENTAL_RESULTS_KEYS}
         results["algorithm_name"] = "SIREN"
@@ -379,8 +413,10 @@ for steps in range(1, n_training_steps + 1):
         results["actual_ratio"] = os.path.getsize(data_path) / get_folder_size(
             compressed_data_save_dir
         )
-        results["psnr"] = psnr
-        results["ssim"] = ssim
+        results["data_psnr"] = data_psnr
+        results["data_ssim"] = data_ssim
+        results["MV_psnr"] = mv_psnr
+        results["MV_ssim"] = mv_ssim
         results["compression_time_seconds"] = compression_time_seconds
         results["decompression_time_seconds"] = decompression_time_seconds
         csv_path = os.path.join(output_dir, "results.csv")
